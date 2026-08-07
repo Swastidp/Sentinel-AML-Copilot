@@ -7,8 +7,8 @@
 PY  := python
 PKG := sentinel
 
-.PHONY: help install doctor bootstrap pipeline api ui test test-integration eval \
-        loadtest report metrics check fmt lint types cov clean
+.PHONY: help install doctor bootstrap generate quality pipeline api ui test test-integration \
+        eval loadtest report metrics check fmt lint types cov clean
 
 help:
 	@echo "Sentinel AML Copilot"
@@ -16,6 +16,8 @@ help:
 	@echo "  install           install the package with dev extras"
 	@echo "  doctor            ping every store and verify the LLM model slugs"
 	@echo "  bootstrap         create Postgres schema, Neo4j constraints, Qdrant collections"
+	@echo "  generate          synthesise the population and land it in the raw zone"
+	@echo "  quality           run the data-quality gate - exits 1 if a BLOCKING check fails"
 	@echo "  pipeline          full batch: generate -> validate -> load all stores"
 	@echo "  api               run the FastAPI service (reload)"
 	@echo "  ui                run the Streamlit console"
@@ -23,7 +25,10 @@ help:
 	@echo "  test-integration  add tests that hit live cloud stores"
 	@echo "  eval              agent eval harness - COSTS LLM TOKENS"
 	@echo "  loadtest          measure /v1/score latency (p50/p95/p99)"
+	@echo "  metrics           precision/recall/AUC against the ground-truth labels"
 	@echo "  report            metrics + Excel MIS pack"
+	@echo "  lint              ruff check + format --check"
+	@echo "  types             mypy --strict"
 	@echo "  check             ruff + mypy --strict + unit tests (what CI runs)"
 	@echo "  fmt               auto-fix lint and format"
 	@echo "  cov               unit tests with a coverage report"
@@ -38,6 +43,14 @@ doctor:
 
 bootstrap:
 	$(PY) scripts/bootstrap_stores.py
+
+generate:
+	$(PY) -m $(PKG).pipeline.generate
+
+# Exits non-zero when a BLOCKING check fails, so `make quality` failing IS the gate working.
+# The report is still written to data/quality/dq_report.json either way.
+quality:
+	$(PY) -m $(PKG).pipeline.quality
 
 pipeline:
 	$(PY) -m $(PKG).pipeline.run

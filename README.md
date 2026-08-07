@@ -136,8 +136,9 @@ trivially reach 1.0: a small merchant with genuinely high fan-in, salary-day fan
 expense pooling, and a genuine dormant-account return.
 
 Ground truth lives in a `typology_labels` table that **only the metrics module and the tests may
-read** — a lint rule in CI enforces it. Precision and recall are measured against it and reported
-as measured, whatever the numbers turn out to be.
+read** — a lint rule is designed to enforce it once CI exists; today the boundary is held by
+convention and a test. Precision and recall are measured against it and reported as measured,
+whatever the numbers turn out to be.
 
 ## Getting started
 
@@ -157,18 +158,22 @@ Nothing sensitive is committed; secrets live in `.env` locally and in GitHub Act
 | Command | What it does |
 |---|---|
 | `make doctor` | Ping every store and verify the LLM model slugs — run this first |
-| `make pipeline` | Generate data → validate → load Postgres, Neo4j, Qdrant, Redis (idempotent) |
+| `make generate` | Synthesise the population and land 205,419 transactions in the raw zone |
+| `make quality` | Run the 12-check data-quality gate — exits 1 if a BLOCKING check fails |
+| `make pipeline` | Generate data → validate → load Postgres, Neo4j, Qdrant, Redis (idempotent). **Not wired yet** — `pipeline/run.py` does not exist, so this target fails today. Run `generate` and `quality` individually |
 | `make api` | Run the FastAPI service |
 | `make ui` | Run the Streamlit investigator console |
 | `make test` | Unit tests — no network, no LLM tokens |
 | `make eval` | Agent eval harness against the golden alert set (**costs tokens**) |
-| `make check` | `ruff` + `mypy --strict` + unit tests — exactly what CI runs |
+| `make check` | `ruff` + `mypy --strict` + 370 unit tests — the intended CI gate (no workflow file exists yet) |
 
-`make help` lists all 16 targets. On Windows, GNU Make is typically installed as `mingw32-make`,
+`make help` lists all 20 targets. On Windows, GNU Make is typically installed as `mingw32-make`,
 so substitute that for `make` (e.g. `mingw32-make check`).
 
-Every load is idempotent: Postgres uses `INSERT … ON CONFLICT DO UPDATE`, Neo4j uses `MERGE`, and
-Qdrant point IDs are deterministic UUID5 hashes. Re-running the pipeline is always safe.
+Every load is designed to be idempotent: Postgres uses `INSERT … ON CONFLICT DO UPDATE`, Neo4j uses
+`MERGE`, and Qdrant point IDs are deterministic UUID5 hashes, so re-running the pipeline is always
+safe. None of the four loaders is written yet — `generate` and `quality` are the two stages that run
+today.
 
 ## Honest limitations
 
