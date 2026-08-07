@@ -258,11 +258,12 @@ def test_every_domain_dataclass_is_frozen_and_slotted():
     the per-instance `__dict__` slots remove is the difference between fitting in memory and not.
     """
     classes = domain_dataclasses()
-    # Exact, not a floor: 12 tables + 16 value objects. A deleted entity must fail the suite rather
+    # Exact, not a floor: 12 tables + 17 value objects. A deleted entity must fail the suite rather
     # than quietly satisfy an inequality. T1.2 added the eight shapes the ports return —
     # AccountProfile, FundFlowResult, IdentifierLink, SharedIdentifierResult, GraphNode, GraphEdge,
-    # Subgraph, LLMCompletion — so this count moves with the port layer, deliberately.
-    assert len(classes) == 28, f"expected 12 entities + 16 value objects, found {classes}"
+    # Subgraph, LLMCompletion — so this count moves with the port layer, deliberately. T3.1 added
+    # BatchProfile, the statistical shape the data-quality drift checks compare against.
+    assert len(classes) == 29, f"expected 12 entities + 17 value objects, found {classes}"
     for cls in classes:
         params = cls.__dataclass_params__  # type: ignore[attr-defined]
         assert params.frozen, f"{cls.__name__} is not frozen"

@@ -535,6 +535,53 @@ class Subgraph:
             )
 
 
+# --- data quality ------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class BatchProfile:
+    """The statistical shape of one ingested batch — the thing a *later* batch is compared against.
+
+    Four of the twelve data-quality checks are drift checks: they ask whether this batch looks like
+    the recent past. That question has no answer unless the recent past was measured and kept, so a
+    gate run that passes writes one of these. Without it the drift checks can only ever be skipped,
+    and a gate that permanently skips a third of its checks is a gate in name only.
+
+    A value object rather than an entity because it has no table in `docs/02-DATA-MODEL.md`: it is
+    a summary this system works out, keyed by the batch it describes and never updated afterwards.
+
+    `null_rates` and `channel_mix` are fractions in 0..1, not percentages — the drift thresholds are
+    expressed in percentage *points*, and mixing the two units is exactly how a 15pp threshold turns
+    into a 1500pp one. `amount_deciles` is `Decimal` because the boundaries are rupee amounts, and
+    it is a quantile ladder rather than a mean: a mean amount cannot tell a batch that gained a few
+    huge transfers from one whose whole distribution shifted, and only the second is drift.
+    """
+
+    batch_id: str
+    computed_at: datetime
+    window_end: date
+    row_count: int
+    null_rates: Mapping[str, float]
+    channel_mix: Mapping[str, float]
+    amount_deciles: tuple[Decimal, ...]
+
+    def __post_init__(self) -> None:
+        ensure_aware(self.computed_at, "computed_at")
+        _ensure_non_negative_int(self.row_count, "row_count")
+        for column, rate in self.null_rates.items():
+            ensure_in_range(rate, f"null_rates[{column}]", 0.0, 1.0)
+        for channel, share in self.channel_mix.items():
+            ensure_in_range(share, f"channel_mix[{channel}]", 0.0, 1.0)
+        # A quantile ladder that runs backwards is not a ladder. It would make the KS-style
+        # comparison in check 12 report a drift statistic computed against nonsense, which is worse
+        # than reporting nothing at all.
+        for lower, upper in zip(self.amount_deciles, self.amount_deciles[1:], strict=False):
+            if upper < lower:
+                raise DomainValidationError(
+                    f"amount_deciles must be non-decreasing; {upper} follows {lower}."
+                )
+
+
 # --- retrieval ---------------------------------------------------------------------------------
 
 

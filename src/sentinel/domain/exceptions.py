@@ -19,6 +19,9 @@ An adapter may subclass any of these to carry driver detail — `PostgresUnavail
 but it must not introduce a sibling root. `api/errors.py` catches the five above and nothing else,
 so a new top-level type would fall through to a 500 with no body the caller can act on.
 
+The one deliberate exception to that table is `DataQualityGateFailed`, which is raised only by the
+batch pipeline and can never reach an HTTP handler — see its own docstring.
+
 This module lives in `domain` and imports nothing outside the standard library.
 """
 
@@ -115,6 +118,35 @@ class StoreUnavailableError(SentinelError):
         self.kind = kind
         self.identifier = identifier
         super().__init__(f"{kind} unavailable while reading {identifier!r}: {reason}")
+
+
+# --- batch pipeline --------------------------------------------------------------------------
+
+
+class DataQualityGateFailed(SentinelError):
+    """At least one `BLOCKING` data-quality check failed, so nothing is promoted to curated.
+
+    A direct child of `SentinelError` rather than one of the five above, and that is deliberate
+    rather than an oversight of the closed-hierarchy rule. This is raised by
+    `pipeline/quality.py` and by nothing else; the batch has no HTTP caller, so there is no status
+    code it could sensibly map to. `api/errors.py` never sees it. Failing loudly here is the
+    correct behaviour — a wrong number reaching a regulatory report is far worse than a late one.
+
+    Raised **after** the run and its check results have been persisted, never instead of. The audit
+    trail of why a batch was blocked is the entire reason the gate exists, so it has to survive the
+    failure.
+    """
+
+    def __init__(self, run_id: str, batch_id: str, failures: tuple[str, ...]) -> None:
+        self.run_id = run_id
+        self.batch_id = batch_id
+        self.failures = failures
+        listed = ", ".join(failures) if failures else "(none recorded)"
+        super().__init__(
+            f"data-quality run {run_id} blocked batch {batch_id}: "
+            f"{len(failures)} blocking check(s) failed - {listed}. "
+            f"Nothing was promoted to the curated zone."
+        )
 
 
 # --- configuration ---------------------------------------------------------------------------

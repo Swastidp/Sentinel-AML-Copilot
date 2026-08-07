@@ -227,8 +227,20 @@ class DqSeverity(StrEnum):
 
 
 class DqCheckStatus(StrEnum):
+    """How one check ended.
+
+    `SKIPPED` is the third answer and it is not decoration. Four of the twelve checks compare the
+    batch against a 7-day rolling baseline, and on the very first run no baseline exists. Reporting
+    those as `PASS` would put four green ticks in the report for work that never happened — the
+    exact failure mode that check 9 had before it was rewritten. A skipped check carries the reason
+    it was skipped and, crucially, **never satisfies a BLOCKING gate**: `DqCheckResult.blocks_batch`
+    is false for it (nothing failed), but the run is downgraded to `PASSED_WITH_WARNINGS` so that
+    "we could not verify this" is visible rather than indistinguishable from "we verified it".
+    """
+
     PASS = "PASS"
     FAIL = "FAIL"
+    SKIPPED = "SKIPPED"
 
 
 class DqRunStatus(StrEnum):
