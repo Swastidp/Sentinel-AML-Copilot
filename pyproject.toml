@@ -117,9 +117,12 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # pyarrow ships `py.typed`, but `pyarrow.parquet` and `pyarrow.dataset` leave their public functions
-# unannotated, so every call into them is a `no-untyped-call` error under --strict. Scoped to the one
-# module that touches them rather than relaxed package-wide: everything else keeps the full check.
-module = ["sentinel.infrastructure.storage.parquet_store"]
+# unannotated, so every call into them is a `no-untyped-call` error under --strict. Scoped to the two
+# modules that touch them rather than relaxed package-wide: everything else keeps the full check.
+module = [
+    "sentinel.infrastructure.storage.parquet_store",
+    "sentinel.infrastructure.storage.dq_store",
+]
 disallow_untyped_calls = false
 
 # ---------------------------------------------------------------------------
