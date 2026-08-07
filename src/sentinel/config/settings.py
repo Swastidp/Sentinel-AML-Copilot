@@ -22,6 +22,7 @@ exact variable the moment an adapter actually needs it.
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -119,7 +120,27 @@ class Settings(BaseSettings):
     data_raw_path: Path = Path("data/raw")
     data_curated_path: Path = Path("data/curated")
     data_seed_path: Path = Path("data/seed")
+    data_quality_path: Path = Path("data/quality")
     duckdb_path: Path = Path("data/sentinel.duckdb")
+
+    # --- data-quality gate ---------------------------------------------------------------------
+    # Operational knobs, deliberately here and not in `config/weights.py`. The risk *weights* are a
+    # model and a weight change is a reviewable code change; these are tolerances an operations team
+    # widens or tightens per environment, and a strict local threshold that would block a noisy
+    # staging feed is exactly the case an env var exists for. Every check reads its bound from here
+    # rather than holding a literal, so "why did the gate block this?" is answerable from config.
+    dq_row_count_tolerance: float = Field(default=0.40, gt=0.0, le=1.0)
+    #: Rs 10 crore. A single retail payment above this is a data defect, not a large customer.
+    dq_max_amount_inr: Decimal = Field(default=Decimal("100000000"), gt=0)
+    #: Drift thresholds, as fractions. 0.15 means fifteen percentage *points*, matching
+    #: `docs/05-DATA-FLOW.md` §4, not a fifteen-percent relative change.
+    dq_null_rate_drift: float = Field(default=0.15, gt=0.0, le=1.0)
+    dq_channel_mix_drift: float = Field(default=0.20, gt=0.0, le=1.0)
+    #: Maximum KS-style deviation between this batch's amount distribution and the baseline's.
+    dq_amount_drift_ks: float = Field(default=0.15, gt=0.0, le=1.0)
+    #: How many previous batch profiles form the rolling baseline. One batch a day makes this the
+    #: "7-day rolling mean" the check table names.
+    dq_baseline_batches: int = Field(default=7, ge=1, le=90)
 
     # --- synthetic data generation -----------------------------------------------------------
     generator_seed: int = 20260803
@@ -236,7 +257,12 @@ class Settings(BaseSettings):
     def ensure_data_dirs(self) -> None:
         """Create the lakehouse directories. Called by the pipeline entrypoint, which is why the
         raw and curated zones need no committed `.gitkeep` files."""
-        for path in (self.data_raw_path, self.data_curated_path, self.embedding_cache_dir):
+        for path in (
+            self.data_raw_path,
+            self.data_curated_path,
+            self.data_quality_path,
+            self.embedding_cache_dir,
+        ):
             path.mkdir(parents=True, exist_ok=True)
         self.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
 

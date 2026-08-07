@@ -41,6 +41,8 @@ htmlcov/
 # data/seed/ IS tracked — hand-authored policy corpus and case narratives
 data/raw/
 data/curated/
+# Data-quality run history, reports, and baseline profiles — written per run by the gate.
+data/quality/
 data/*.duckdb
 data/*.duckdb.wal
 
