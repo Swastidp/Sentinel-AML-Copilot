@@ -236,6 +236,7 @@ def make_vector(account_id: str, window: FeatureWindow) -> FeatureVector:
         txn_count=3,
         total_credit=Decimal("100.00"),
         total_debit=Decimal("94.00"),
+        balance_delta=Decimal("6.00"),
         distinct_credit_counterparties=2,
         distinct_debit_counterparties=1,
         max_single_txn=Decimal("60.00"),

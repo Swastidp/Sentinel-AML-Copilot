@@ -10,7 +10,7 @@ Three properties follow, and they are the point:
 * **Reproducible.** Same evidence plus same config always gives the same score. An auditor can
   recompute any stored figure from the tool trace with a calculator.
 * **Explainable by construction.** The score is not a number with a story attached afterwards; it
-  *is* the sum of six named contributions, each carrying the raw signal that produced it. The
+  *is* the sum of seven named contributions, each carrying the raw signal that produced it. The
   console breakdown and the narrative's citations read the same objects.
 * **Tunable without re-validating a prompt.** Weights and thresholds are data in
   `config/weights.py`.
@@ -27,11 +27,13 @@ from decimal import Decimal
 
 from sentinel.config.weights import (
     ACCOUNT_PROFILE,
+    COMPONENT_ORDER,
     DAYS_PER_YEAR,
     FAN_ASYMMETRY,
     IDENTITY_LINKAGE,
     NETWORK_STRUCTURE,
     PASS_THROUGH,
+    RULE_HITS,
     VELOCITY_ANOMALY,
     WINDOW_DAYS,
     ScoringConfig,
@@ -42,6 +44,7 @@ from sentinel.domain.value_objects import (
     AccountProfile,
     FeatureVector,
     FundFlowResult,
+    RuleHit,
     ScoreComponent,
     SharedIdentifierResult,
 )
@@ -59,7 +62,13 @@ class RiskEvidence:
     Every field is optional because the agent decides which tools to call and any call can fail.
     Bundling them into one object rather than five parameters means adding a seventh signal later
     changes one type instead of every call site — and it makes "what did we know when we scored
-    this?" a single serialisable thing.
+    this?" a single serialisable thing. `rule_hits` is that seventh signal arriving, and it cost
+    one field.
+
+    `rule_hits` distinguishes `None` from `()` and the difference is load-bearing: `None` is "the
+    rule engine was never consulted", `()` is "it ran and nothing fired". No production caller
+    supplies it yet — the engine is Stage 6 task T6.1 — so in production this is `None` today and
+    the component reports `not gathered` rather than pretending the account is rule-clean.
     """
 
     account_id: str
@@ -67,15 +76,21 @@ class RiskEvidence:
     profile: AccountProfile | None = None
     flow: FundFlowResult | None = None
     identifiers: SharedIdentifierResult | None = None
+    rule_hits: tuple[RuleHit, ...] | None = None
 
     @property
     def gathered_count(self) -> int:
-        """How many of the four evidence sources are present.
+        """How many of the five evidence sources are present.
 
-        A score built on one source is not comparable to one built on four, so callers surface this
+        A score built on one source is not comparable to one built on five, so callers surface this
         rather than presenting every score as equally well-founded.
+
+        An empty `rule_hits` tuple counts as gathered. "The engine ran and cleared the account" is a
+        real evidence source, and folding it in with "we never ran it" is the same collapse the
+        `not gathered` detail exists to prevent — so the test is `is not None`, not truthiness.
         """
-        return sum(1 for item in (self.features, self.profile, self.flow, self.identifiers) if item)
+        sources = (self.features, self.profile, self.flow, self.identifiers, self.rule_hits)
+        return sum(1 for item in sources if item is not None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,10 +113,10 @@ class RiskAssessment:
     def __post_init__(self) -> None:
         if not 0.0 <= self.score <= 100.0:
             raise ValueError(f"score must be in 0..100; got {self.score}")
-        if len(self.components) != 6:
+        if len(self.components) != len(COMPONENT_ORDER):
             raise ValueError(
-                f"expected all six components (missing evidence scores zero, it is not omitted); "
-                f"got {len(self.components)}"
+                f"expected all {len(COMPONENT_ORDER)} components (missing evidence scores zero, it "
+                f"is not omitted); got {len(self.components)}"
             )
 
     @property
@@ -391,13 +406,48 @@ def _score_identity(
     return ScoreComponent(IDENTITY_LINKAGE, "Identity linkage", normalised * weight, detail)
 
 
+def _score_rule_hits(
+    hits: tuple[RuleHit, ...] | None, weight: float, th: ScoringThresholds
+) -> ScoreComponent:
+    """Named patterns the rule engine matched, which no ramp over flow or graph shape can see.
+
+    The other six components all read *shape*: a ratio, a degree, a depth, a count of people. R004
+    structuring is not a shape — it is "4 to 9 debits in the Rs 45,000-49,900 band across 5 to 10
+    days", a literal description of a deliberate avoidance pattern. Measured at Stage 2, STRUCTURING
+    accounts reached the 40 review threshold in 0% of cases and LAYERING in 2%, because the rule
+    fired correctly and then the score, blind to it, came out near 8 and the case closed. This
+    component is the path by which a rule that fired reaches the number that decides.
+
+    Contributions are **summed, then ramped**, because two rules firing is more evidence than one
+    and the engine's own `contribution` is already its statement of how much each is worth. They are
+    deliberately *not* re-weighted by `severity`: severity is the label the same rule author chose
+    alongside the contribution, so scaling one by the other would count one judgement twice.
+
+    Every hit is named in the detail, including any whose contribution is zero. A rule that fired
+    and contributed nothing still tells an analyst what the engine saw, and dropping it from the
+    breakdown would make the alert list and the score disagree about what happened.
+    """
+    if hits is None:
+        return ScoreComponent(RULE_HITS, "Rule engine hits", 0.0, _NOT_GATHERED)
+    if not hits:
+        return ScoreComponent(RULE_HITS, "Rule engine hits", 0.0, "no rules fired")
+
+    total = sum(hit.contribution for hit in hits)
+    normalised = _ramp(total, th.rule_contribution_floor, th.rule_contribution_full)
+    detail = "; ".join(
+        f"{hit.rule_code} {hit.rule_name} ({hit.severity}, +{hit.contribution:.0f}): {hit.detail}"
+        for hit in hits
+    )
+    return ScoreComponent(RULE_HITS, "Rule engine hits", normalised * weight, detail)
+
+
 # --- public API ---------------------------------------------------------------------------------
 
 
 def assess_risk(evidence: RiskEvidence, config: ScoringConfig | None = None) -> RiskAssessment:
     """Score an account from gathered evidence. Pure: no I/O, no clock, no randomness.
 
-    All six components are always present in the result. A component with no evidence contributes
+    All seven components are always present in the result. A component with no evidence contributes
     zero and reports `not gathered`, so the breakdown distinguishes "we checked and it was clean"
     from "we never checked" — collapsing those two would let an unlucky investigation look like a
     thorough one.
@@ -413,9 +463,10 @@ def assess_risk(evidence: RiskEvidence, config: ScoringConfig | None = None) -> 
         _score_profile(evidence.profile, evidence.features, weights.account_profile, th),
         _score_velocity(evidence.features, weights.velocity_anomaly, th),
         _score_identity(evidence.identifiers, weights.identity_linkage, th),
+        _score_rule_hits(evidence.rule_hits, weights.rule_hits, th),
     )
 
-    # Clamped because float addition of six weighted terms can land a hair above 100.
+    # Clamped because float addition of seven weighted terms can land a hair above 100.
     score = min(100.0, sum(c.contribution for c in components))
     return RiskAssessment(
         account_id=evidence.account_id,

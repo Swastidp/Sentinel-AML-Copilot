@@ -126,6 +126,22 @@ class FeatureVector:
     `as_of` is carried so a caller can compute snapshot staleness. Pre-computed features are always
     somewhat stale; hiding that is how real systems make silent wrong decisions, which is why the
     scoring API returns the age alongside the score.
+
+    **`balance_delta` is what `pass_through_ratio` cannot say.** The ratio is debits over credits,
+    so a trader who takes ₹10 lakh in and pays ₹9.7 lakh of it out to suppliers scores 0.97 — and so
+    does a mule who receives ₹10 lakh and sweeps ₹9.7 lakh to five sink accounts the same night. The
+    difference is what is left: the trader keeps working capital, the mule ends the week at ₹300.
+    `balance_delta` is that residue in rupees (credits minus debits over the window), and it is the
+    one number that separates the family-pooling false positive in
+    `docs/13-KNOWN-FALSE-POSITIVES.md` from a real collection mule. It is signed: negative means the
+    account paid out more than it took in, which an account spending down an opening balance
+    legitimately does.
+
+    **It is required and has no default.** It briefly carried `Decimal("0")` so the field could be
+    added without touching the then-existing construction sites; that default is gone, because a
+    zero nobody computed is indistinguishable from a genuine break-even week. Left defaulted, a
+    `FeatureVector -> AccountFeatures -> FeatureVector` round trip through the Stage 5 loader could
+    drop a real figure and silently reconstruct the exact value that reads as "swept clean".
     """
 
     account_id: str
@@ -134,6 +150,7 @@ class FeatureVector:
     txn_count: int
     total_credit: Decimal
     total_debit: Decimal
+    balance_delta: Decimal
     distinct_credit_counterparties: int
     distinct_debit_counterparties: int
     max_single_txn: Decimal
@@ -149,6 +166,8 @@ class FeatureVector:
         ensure_aware(self.as_of, "as_of")
         ensure_non_negative(self.total_credit, "total_credit")
         ensure_non_negative(self.total_debit, "total_debit")
+        # `balance_delta` is deliberately unguarded: it is signed, and negative is the ordinary
+        # case for an account spending down a balance it held before the window opened.
         ensure_in_range(self.night_txn_ratio, "night_txn_ratio", 0.0, 1.0)
         ensure_in_range(self.new_counterparty_ratio, "new_counterparty_ratio", 0.0, 1.0)
 

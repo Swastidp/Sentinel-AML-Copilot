@@ -41,6 +41,7 @@ from sentinel.config.weights import (
     IDENTITY_LINKAGE,
     NETWORK_STRUCTURE,
     PASS_THROUGH,
+    RULE_HITS,
     VELOCITY_ANOMALY,
     GateConfig,
     RiskWeights,
@@ -58,6 +59,7 @@ from sentinel.domain.enums import (
     Recommendation,
     RiskRating,
     ScoreDecision,
+    Severity,
 )
 from sentinel.domain.exceptions import ConfigurationError
 from sentinel.domain.value_objects import (
@@ -67,6 +69,7 @@ from sentinel.domain.value_objects import (
     FundFlowResult,
     IdentifierLink,
     RingFinding,
+    RuleHit,
     ScoreComponent,
     SharedIdentifierResult,
 )
@@ -95,6 +98,7 @@ def features(
         txn_count=txn_count,
         total_credit=Decimal(credit),
         total_debit=Decimal(debit),
+        balance_delta=Decimal(credit) - Decimal(debit),
         distinct_credit_counterparties=3,
         distinct_debit_counterparties=3,
         max_single_txn=Decimal("5000"),
@@ -230,6 +234,32 @@ def identifiers(*, devices: int = 0, others: int = 0) -> SharedIdentifierResult:
     return SharedIdentifierResult(account_id="ACC1", shared_devices=links)
 
 
+def rule_hit(
+    *,
+    code: str = "R004",
+    name: str = "Structuring",
+    severity: Severity = Severity.HIGH,
+    contribution: float = 30.0,
+    detail: str = "6 debits in the INR 45,000-49,900 band across 6 days",
+) -> RuleHit:
+    """One rule that fired.
+
+    **Synthetic on purpose.** The rule engine R001-R007 is Stage 6 task T6.1 and does not exist, so
+    nothing in the codebase produces a `RuleHit` today. These tests fix the *arithmetic* of the
+    component; they say nothing about how often real rules fire or on what.
+    """
+    return RuleHit(
+        rule_code=code,
+        rule_name=name,
+        severity=severity,
+        contribution=contribution,
+        detail=detail,
+        window_start=T0,
+        window_end=T1,
+        evidence={"band_txn_count": 6},
+    )
+
+
 def component(assessment, code: str):
     return next(c for c in assessment.components if c.code == code)
 
@@ -240,6 +270,29 @@ def component(assessment, code: str):
 def test_default_weights_total_one_hundred():
     """The score is presented as 0-100, so the weights must actually sum to 100."""
     assert sum(RiskWeights().as_mapping().values()) == pytest.approx(100.0)
+
+
+def test_the_shipped_weight_table_is_the_v2_table_rescaled_by_four_fifths():
+    """The v3 table is pinned, and pinned as a *rescale* rather than as seven loose numbers.
+
+    Adding `RULE_HITS` at 20 had to come out of the other six, and a uniform 0.8 is the only
+    re-weighting defensible without new measurement: it preserves every relative ordering and makes
+    a v2 score convertible to v3 by one multiplication. Asserting the ratio rather than the literals
+    is what makes an *uneven* future retune show up here as a failure, which is the point — an
+    uneven retune is a claim about relative importance and needs evidence attached.
+    """
+    v2 = {
+        PASS_THROUGH: 25.0,
+        FAN_ASYMMETRY: 20.0,
+        NETWORK_STRUCTURE: 20.0,
+        ACCOUNT_PROFILE: 15.0,
+        VELOCITY_ANOMALY: 10.0,
+        IDENTITY_LINKAGE: 10.0,
+    }
+    shipped = RiskWeights().as_mapping()
+    assert shipped[RULE_HITS] == pytest.approx(20.0)
+    for code, old in v2.items():
+        assert shipped[code] == pytest.approx(old * 0.8), code
 
 
 def test_weights_that_do_not_total_one_hundred_are_rejected():
@@ -253,10 +306,14 @@ def test_negative_weights_are_rejected():
     The previous version of this test summed to 95, so the total-100 guard raised first and a bare
     `pytest.raises` could not tell which branch fired — the negativity check was never reached.
     """
-    # Sums to exactly 100 (-25 + 45 + 40 + 20 + 10 + 10), so the total guard cannot fire instead.
+    # Sums to exactly 100 (-25 + 45 + 40 + 20 + 8 + 8 + 4), so the total guard cannot fire instead.
     with pytest.raises(ConfigurationError, match="cannot be negative"):
         RiskWeights(
-            pass_through=-25.0, fan_asymmetry=45.0, network_structure=40.0, account_profile=20.0
+            pass_through=-25.0,
+            fan_asymmetry=45.0,
+            network_structure=40.0,
+            account_profile=20.0,
+            rule_hits=4.0,
         )
 
 
@@ -318,6 +375,7 @@ def test_default_thresholds_construct():
         {"velocity_zscore_floor": 9.0, "velocity_zscore_full": 6.0},
         {"night_ratio_floor": 0.9, "night_ratio_full": 0.6},
         {"shared_customers_floor": 9.0, "shared_customers_full": 4.0},
+        {"rule_contribution_floor": 100.0, "rule_contribution_full": 50.0},
     ],
 )
 def test_an_inverted_ramp_is_rejected_at_construction_not_at_scoring_time(kwargs):
@@ -340,10 +398,10 @@ def test_an_inverted_ramp_is_rejected_at_construction_not_at_scoring_time(kwargs
     ],
 )
 def test_a_fraction_outside_zero_to_one_is_rejected(kwargs):
-    """`unsigned_fan_factor=5.0` makes FAN_ASYMMETRY worth 100 against a weight of 20.
+    """`unsigned_fan_factor=5.0` makes FAN_ASYMMETRY worth 80 against a weight of 16.
 
     This is the only way a component can exceed its own weight, which would break the claim that
-    the score is the sum of six bounded contributions.
+    the score is the sum of seven bounded contributions.
     """
     with pytest.raises(ConfigurationError, match=r"must be in 0\.\.1"):
         ScoringThresholds(**kwargs)
@@ -404,12 +462,12 @@ def test_with_no_evidence_at_all_the_score_is_zero_and_every_component_says_so()
     assert result.score == 0.0
     assert result.decision is ScoreDecision.ALLOW
     assert result.evidence_sources == 0
-    assert len(result.components) == 6
+    assert len(result.components) == 7
     assert all(c.contribution == 0.0 for c in result.components)
     assert all(c.detail == "not gathered" for c in result.components)
 
 
-def test_all_six_components_are_always_present_and_in_a_stable_order():
+def test_all_seven_components_are_always_present_and_in_a_stable_order():
     """The console renders this breakdown and the narrative cites it, so order must not drift."""
     result = assess_risk(RiskEvidence(account_id="ACC1", features=features()))
     assert tuple(c.code for c in result.components) == COMPONENT_ORDER
@@ -431,15 +489,27 @@ def test_evidence_sources_counts_what_was_actually_supplied():
     assert ev.gathered_count == 2
 
 
+def test_an_empty_rule_hit_tuple_counts_as_a_gathered_source():
+    """ "The engine ran and cleared the account" is evidence; "we never ran it" is not.
+
+    A truthiness test would have collapsed the two, because an empty tuple is falsey — the one
+    field on `RiskEvidence` where that distinction is not free.
+    """
+    ran = RiskEvidence(account_id="ACC1", rule_hits=())
+    never_ran = RiskEvidence(account_id="ACC1")
+    assert ran.gathered_count == 1
+    assert never_ran.gathered_count == 0
+
+
 # --- individual components ----------------------------------------------------------------------
 
 
 def test_full_pass_through_earns_the_whole_component_and_no_more():
-    """Retention within the window is 1 - pass_through; scoring both would double-count to 50."""
+    """Retention within the window is 1 - pass_through; scoring both would double-count to 40."""
     result = assess_risk(
         RiskEvidence(account_id="ACC1", features=features(credit="100000", debit="100000"))
     )
-    assert component(result, PASS_THROUGH).contribution == pytest.approx(25.0)
+    assert component(result, PASS_THROUGH).contribution == pytest.approx(20.0)
 
 
 def test_ordinary_spending_earns_nothing_for_pass_through():
@@ -459,7 +529,7 @@ def test_debits_above_credits_saturate_rather_than_overflow_the_component():
         RiskEvidence(account_id="ACC1", features=features(credit="100000", debit="150000"))
     )
     detail = component(result, PASS_THROUGH).detail
-    assert component(result, PASS_THROUGH).contribution == pytest.approx(25.0)
+    assert component(result, PASS_THROUGH).contribution == pytest.approx(20.0)
     assert "Forwarded 100%" in detail
     assert "retaining 0%" in detail
 
@@ -473,7 +543,7 @@ def test_an_account_that_drains_with_no_inflow_is_scored_on_the_drain():
     result = assess_risk(
         RiskEvidence(account_id="ACC1", features=features(credit="0", debit="5000000"))
     )
-    assert component(result, PASS_THROUGH).contribution == pytest.approx(25.0)
+    assert component(result, PASS_THROUGH).contribution == pytest.approx(20.0)
     assert "no matching inflow" in component(result, PASS_THROUGH).detail
 
 
@@ -483,7 +553,7 @@ def test_a_small_drain_with_no_inflow_is_ramped_not_flagged():
         RiskEvidence(account_id="ACC1", features=features(credit="0", debit="30000"))
     )
     # Rs 30,000 sits 2/9 of the way up a ramp from Rs 10,000 to Rs 1 lakh.
-    assert component(result, PASS_THROUGH).contribution == pytest.approx(25.0 * 2 / 9)
+    assert component(result, PASS_THROUGH).contribution == pytest.approx(20.0 * 2 / 9)
 
 
 def test_an_account_with_no_movement_at_all_scores_nothing_for_pass_through():
@@ -502,9 +572,9 @@ def test_high_fan_degree_without_a_signature_is_discounted_not_ignored():
     )
     unsigned_points = component(unsigned, FAN_ASYMMETRY).contribution
     signed_points = component(signed, FAN_ASYMMETRY).contribution
-    assert signed_points == pytest.approx(20.0)
+    assert signed_points == pytest.approx(16.0)
     assert 0.0 < unsigned_points < signed_points
-    assert unsigned_points == pytest.approx(20.0 * 0.40)
+    assert unsigned_points == pytest.approx(16.0 * 0.40)
 
 
 def test_a_dispersal_signature_counts_at_full_weight_like_a_collection_one():
@@ -515,7 +585,7 @@ def test_a_dispersal_signature_counts_at_full_weight_like_a_collection_one():
             flow=flow(fan_in=1, fan_out=25, signature=MuleSignature.DISPERSAL_MULE),
         )
     )
-    assert component(result, FAN_ASYMMETRY).contribution == pytest.approx(20.0)
+    assert component(result, FAN_ASYMMETRY).contribution == pytest.approx(16.0)
     assert "DISPERSAL_MULE" in component(result, FAN_ASYMMETRY).detail
 
 
@@ -524,7 +594,7 @@ def test_a_material_cycle_alone_carries_half_the_network_component():
     result = assess_risk(
         RiskEvidence(account_id="ACC1", flow=flow(cycles=(cycle(hops=3, value="500000"),)))
     )
-    assert component(result, NETWORK_STRUCTURE).contribution == pytest.approx(10.0)
+    assert component(result, NETWORK_STRUCTURE).contribution == pytest.approx(8.0)
 
 
 def test_a_small_cycle_is_scaled_down_because_a_traversal_cannot_see_scale():
@@ -537,7 +607,7 @@ def test_a_small_cycle_is_scaled_down_because_a_traversal_cannot_see_scale():
         RiskEvidence(account_id="ACC1", flow=flow(cycles=(cycle(hops=3, value="40000"),)))
     )
     # Rs 40,000 sits a third of the way up a ramp from Rs 10,000 to Rs 1 lakh.
-    assert component(result, NETWORK_STRUCTURE).contribution == pytest.approx(10.0 / 3)
+    assert component(result, NETWORK_STRUCTURE).contribution == pytest.approx(8.0 / 3)
 
 
 def test_hop_depth_is_scored_against_the_depth_actually_searched():
@@ -551,9 +621,9 @@ def test_hop_depth_is_scored_against_the_depth_actually_searched():
     deep = assess_risk(
         RiskEvidence(account_id="ACC1", flow=flow(paths=(path(hops=2),), max_hops=4))
     )
-    # 20 points x a 0.25 share x (2 hops found / 2 searched), then x (2 / 4).
-    assert component(shallow, NETWORK_STRUCTURE).contribution == pytest.approx(5.0)
-    assert component(deep, NETWORK_STRUCTURE).contribution == pytest.approx(2.5)
+    # 16 points x a 0.25 share x (2 hops found / 2 searched), then x (2 / 4).
+    assert component(shallow, NETWORK_STRUCTURE).contribution == pytest.approx(4.0)
+    assert component(deep, NETWORK_STRUCTURE).contribution == pytest.approx(2.0)
 
 
 def test_the_network_component_cannot_exceed_its_weight():
@@ -567,7 +637,7 @@ def test_the_network_component_cannot_exceed_its_weight():
             ),
         )
     )
-    assert component(result, NETWORK_STRUCTURE).contribution == pytest.approx(20.0)
+    assert component(result, NETWORK_STRUCTURE).contribution == pytest.approx(16.0)
 
 
 def test_a_ring_of_one_customers_own_accounts_contributes_nothing():
@@ -595,7 +665,7 @@ def test_the_ring_ramp_runs_on_people_not_accounts(customers, expected_fraction)
         )
     )
     assert component(result, NETWORK_STRUCTURE).contribution == pytest.approx(
-        20.0 * 0.25 * expected_fraction
+        16.0 * 0.25 * expected_fraction
     )
 
 
@@ -604,9 +674,9 @@ def test_a_ring_moving_trivial_amounts_is_scaled_down():
     result = assess_risk(
         RiskEvidence(account_id="ACC1", flow=flow(ring=ring_finding(members=4, value="40000")))
     )
-    # 20 points x a 0.25 share x (3/4 of the customer ramp) x (1/3 of the materiality ramp).
+    # 16 points x a 0.25 share x (3/4 of the customer ramp) x (1/3 of the materiality ramp).
     assert component(result, NETWORK_STRUCTURE).contribution == pytest.approx(
-        20.0 * 0.25 * 0.75 / 3
+        16.0 * 0.25 * 0.75 / 3
     )
 
 
@@ -624,7 +694,7 @@ def test_profile_sub_signals_each_contribute_one_quarter(kwargs, expected_quarte
     """No single profile attribute is damning; a new MIN_KYC account is the ordinary first case."""
     result = assess_risk(RiskEvidence(account_id="ACC1", profile=profile(**kwargs)))
     assert component(result, ACCOUNT_PROFILE).contribution == pytest.approx(
-        15.0 * 0.25 * expected_quarters
+        12.0 * 0.25 * expected_quarters
     )
 
 
@@ -636,7 +706,7 @@ def test_all_four_profile_sub_signals_saturate_the_component_at_exactly_its_weig
             profile=profile(tenure=1, kyc=KycLevel.MIN_KYC, dormant=True, income="1000000"),
         )
     )
-    assert component(result, ACCOUNT_PROFILE).contribution == pytest.approx(15.0)
+    assert component(result, ACCOUNT_PROFILE).contribution == pytest.approx(12.0)
 
 
 def test_throughput_far_above_declared_income_contributes():
@@ -649,7 +719,7 @@ def test_throughput_far_above_declared_income_contributes():
         )
     )
     points = component(result, ACCOUNT_PROFILE).contribution
-    assert points == pytest.approx(15.0 * 0.25)
+    assert points == pytest.approx(12.0 * 0.25)
     assert "declared annual income" in component(result, ACCOUNT_PROFILE).detail
 
 
@@ -666,7 +736,7 @@ def test_the_income_ramp_reports_a_partial_value_not_only_saturation():
             profile=profile(income="1000000"),
         )
     )
-    assert component(result, ACCOUNT_PROFILE).contribution == pytest.approx(15.0 * 0.25 * 0.5)
+    assert component(result, ACCOUNT_PROFILE).contribution == pytest.approx(12.0 * 0.25 * 0.5)
 
 
 @pytest.mark.parametrize(
@@ -694,7 +764,7 @@ def test_the_income_comparison_is_pro_rated_to_the_window_asked_for(window, cred
         )
     )
     assert component(result, ACCOUNT_PROFILE).contribution == pytest.approx(
-        15.0 * 0.25 * 0.5, abs=0.001
+        12.0 * 0.25 * 0.5, abs=0.001
     )
 
 
@@ -710,8 +780,8 @@ def test_velocity_averages_its_two_correlated_signals():
     """A 3am burst scores on both; summing correlated signals would inflate past the weight."""
     both = assess_risk(RiskEvidence(account_id="ACC1", features=features(night=0.6, zscore=6.0)))
     one = assess_risk(RiskEvidence(account_id="ACC1", features=features(night=0.6, zscore=0.0)))
-    assert component(both, VELOCITY_ANOMALY).contribution == pytest.approx(10.0)
-    assert component(one, VELOCITY_ANOMALY).contribution == pytest.approx(5.0)
+    assert component(both, VELOCITY_ANOMALY).contribution == pytest.approx(8.0)
+    assert component(one, VELOCITY_ANOMALY).contribution == pytest.approx(4.0)
 
 
 def test_a_negative_velocity_zscore_scores_nothing_rather_than_inverting():
@@ -739,14 +809,14 @@ def test_three_other_adults_on_one_handset_is_a_household_not_a_ring():
     result = assess_risk(
         RiskEvidence(account_id="ACC1", identifiers=identifiers(devices=1, others=3))
     )
-    assert component(result, IDENTITY_LINKAGE).contribution == pytest.approx(10.0 * 2 / 3)
+    assert component(result, IDENTITY_LINKAGE).contribution == pytest.approx(8.0 * 2 / 3)
 
 
 def test_four_other_customers_on_shared_devices_saturate_identity_linkage():
     result = assess_risk(
         RiskEvidence(account_id="ACC1", identifiers=identifiers(devices=1, others=4))
     )
-    assert component(result, IDENTITY_LINKAGE).contribution == pytest.approx(10.0)
+    assert component(result, IDENTITY_LINKAGE).contribution == pytest.approx(8.0)
 
 
 def test_two_devices_reaching_the_same_relatives_are_not_counted_twice():
@@ -768,6 +838,114 @@ def test_two_devices_reaching_the_same_relatives_are_not_counted_twice():
     assert "at least 2 other customer(s)" in linkage.detail
 
 
+# --- rule hits ------------------------------------------------------------------------------------
+#
+# The seventh component. It exists because the other six all read *shape* — a ratio, a degree, a
+# depth — and a named pattern like R004 structuring ("debits clustered in the Rs 45,000-49,900 band
+# over several days") is not a shape any of those ramps can express.
+#
+# **Every input below is synthetic.** The rule engine R001-R007 is Stage 6 task T6.1 and nothing in
+# the codebase produces a `RuleHit` today, so in production this component reads `None` and reports
+# `not gathered`. These tests fix the arithmetic; they measure nothing about detection rates.
+
+
+def test_a_never_consulted_rule_engine_is_not_gathered():
+    result = assess_risk(RiskEvidence(account_id="ACC1"))
+    assert component(result, RULE_HITS).contribution == 0.0
+    assert component(result, RULE_HITS).detail == "not gathered"
+
+
+def test_an_engine_that_ran_and_fired_nothing_is_distinguishable_from_one_never_run():
+    """Same distinction the other six components make, and the reason `None` is not `()`."""
+    ran = assess_risk(RiskEvidence(account_id="ACC1", rule_hits=()))
+    never = assess_risk(RiskEvidence(account_id="ACC1"))
+    assert component(ran, RULE_HITS).contribution == 0.0
+    assert component(ran, RULE_HITS).detail == "no rules fired"
+    assert component(never, RULE_HITS).detail == "not gathered"
+
+
+def test_one_rule_hit_earns_its_contribution_as_a_share_of_the_component():
+    """A hit worth 30 of a possible 100 earns 30% of the 20-point component."""
+    result = assess_risk(RiskEvidence(account_id="ACC1", rule_hits=(rule_hit(contribution=30.0),)))
+    hits = component(result, RULE_HITS)
+    assert hits.contribution == pytest.approx(20.0 * 0.30)
+    assert "R004 Structuring (HIGH, +30)" in hits.detail
+    assert "45,000-49,900 band" in hits.detail
+
+
+def test_several_rule_hits_sum_because_two_rules_firing_is_more_than_one():
+    result = assess_risk(
+        RiskEvidence(
+            account_id="ACC1",
+            rule_hits=(
+                rule_hit(code="R004", contribution=30.0),
+                rule_hit(code="R002", name="Fan-in concentration", contribution=25.0),
+                rule_hit(code="R006", name="Pass-through", contribution=15.0),
+            ),
+        )
+    )
+    assert component(result, RULE_HITS).contribution == pytest.approx(20.0 * 0.70)
+
+
+def test_every_hit_is_named_in_the_detail_including_a_zero_contribution_one():
+    """A rule that fired and contributed nothing still tells an analyst what the engine saw.
+
+    Dropping it would make the alert list and the score breakdown disagree about what happened,
+    which is the one thing the `reasons` trail exists to prevent.
+    """
+    result = assess_risk(
+        RiskEvidence(
+            account_id="ACC1",
+            rule_hits=(
+                rule_hit(code="R004", contribution=30.0),
+                rule_hit(code="R001", name="Velocity spike", contribution=0.0),
+            ),
+        )
+    )
+    detail = component(result, RULE_HITS).detail
+    assert "R004" in detail
+    assert "R001 Velocity spike (HIGH, +0)" in detail
+
+
+@pytest.mark.parametrize(
+    ("contributions", "expected_fraction"),
+    [
+        ((0.0,), 0.0),
+        ((50.0,), 0.5),
+        ((100.0,), 1.0),
+        ((60.0, 60.0), 1.0),
+        ((100.0, 100.0, 100.0), 1.0),
+    ],
+)
+def test_summed_contributions_clamp_at_the_component_weight(contributions, expected_fraction):
+    """`RuleHit.contribution` is 0..100 each, so three maximal hits sum to 300.
+
+    Without the clamp the component would be worth 60 against a weight of 20 and the score would
+    stop being the sum of seven bounded contributions.
+    """
+    result = assess_risk(
+        RiskEvidence(
+            account_id="ACC1",
+            rule_hits=tuple(
+                rule_hit(code=f"R00{i}", contribution=value)
+                for i, value in enumerate(contributions)
+            ),
+        )
+    )
+    assert component(result, RULE_HITS).contribution == pytest.approx(20.0 * expected_fraction)
+
+
+def test_the_saturation_point_is_config_not_a_literal():
+    """An operator who wants one HIGH rule to carry the whole component lowers the full value."""
+    evidence = RiskEvidence(account_id="ACC1", rule_hits=(rule_hit(contribution=30.0),))
+    default = assess_risk(evidence)
+    eager = assess_risk(
+        evidence, ScoringConfig(thresholds=ScoringThresholds(rule_contribution_full=30.0))
+    )
+    assert component(default, RULE_HITS).contribution == pytest.approx(6.0)
+    assert component(eager, RULE_HITS).contribution == pytest.approx(20.0)
+
+
 # --- whole-account scenarios ---------------------------------------------------------------------
 
 
@@ -786,14 +964,75 @@ def full_signal_evidence() -> RiskEvidence:
             total_out="12000000",
         ),
         identifiers=identifiers(devices=2, others=4),
+        rule_hits=(
+            rule_hit(code="R004", contribution=60.0),
+            rule_hit(code="R006", name="Pass-through", contribution=60.0),
+        ),
     )
+
+
+def structuring_mule(*, with_rule_hits: bool) -> RiskEvidence:
+    """The account the seventh component exists for.
+
+    Nine debits of about Rs 47,000 over six days — deliberately parked just under a Rs 50,000
+    reporting line — out of a three-month-old minimum-KYC account. The graph sees almost nothing:
+    fan-out of nine barely clears the degree floor, there is no cycle, no ring, no shared device.
+    Every one of the six flow-and-graph components is close to blind here, which is why STRUCTURING
+    reached 40 in 0% of Stage 2 cases while R004 flagged it correctly.
+
+    `with_rule_hits` toggles the *only* difference between the two halves of the test below.
+    """
+    hits = (
+        rule_hit(
+            code="R004",
+            name="Structuring",
+            severity=Severity.HIGH,
+            contribution=70.0,
+            detail="9 debits of INR 45,000-49,900 across 6 days, total INR 4,23,000",
+        ),
+    )
+    return RiskEvidence(
+        account_id="ACC1",
+        features=features(credit="450000", debit="423000", night=0.35, zscore=2.5, txn_count=13),
+        profile=profile(tenure=3, kyc=KycLevel.MIN_KYC, income="300000"),
+        flow=flow(
+            fan_in=4, fan_out=9, signature=MuleSignature.NO_CLEAR_SIGNATURE, total_out="423000"
+        ),
+        identifiers=identifiers(),
+        rule_hits=hits if with_rule_hits else None,
+    )
+
+
+def test_a_structuring_mule_crosses_the_review_threshold_only_once_the_rule_hit_is_read():
+    """The false negative this change exists to fix, end to end.
+
+    Without the seventh component the account is ALLOWed and the agent recommends CLOSE, while R004
+    sits in the alert list saying exactly what happened. The rule was always right; the score simply
+    could not see it.
+
+    **This is not a measured improvement.** The rule engine is Stage 6 task T6.1 and produces
+    nothing today, so the `RuleHit` here is hand-written. What is demonstrated is that the wiring
+    carries a hit through to the decision — not how often a real R004 fires or how right it is.
+    """
+    blind = assess_risk(structuring_mule(with_rule_hits=False))
+    seeing = assess_risk(structuring_mule(with_rule_hits=True))
+
+    assert component(blind, RULE_HITS).contribution == 0.0
+    assert blind.score == pytest.approx(27.81, abs=0.01)
+    assert blind.decision is ScoreDecision.ALLOW
+
+    # 70 of a possible 100 summed contribution, so 70% of the 20-point component.
+    assert component(seeing, RULE_HITS).contribution == pytest.approx(14.0)
+    assert seeing.score == pytest.approx(41.81, abs=0.01)
+    assert seeing.decision is ScoreDecision.REVIEW
+    assert "9 debits of INR 45,000-49,900" in component(seeing, RULE_HITS).detail
 
 
 def test_a_textbook_mule_scores_at_the_top_and_blocks():
     result = assess_risk(full_signal_evidence())
     assert result.score == pytest.approx(100.0)
     assert result.decision is ScoreDecision.BLOCK
-    assert result.evidence_sources == 4
+    assert result.evidence_sources == 5
 
 
 # --- the four hard negatives ---------------------------------------------------------------------
@@ -808,6 +1047,13 @@ def test_a_textbook_mule_scores_at_the_top_and_blocks():
 # have survived pass-through being mis-weighted six-fold.
 #
 # Each score is pinned with `pytest.approx`, not bounded, so a regression reads as a changed number.
+#
+# None of them supplies `rule_hits`, so the seventh component reports `not gathered` and contributes
+# nothing — which is also what production does today, because the rule engine is Stage 6 task T6.1.
+# Every figure below is therefore exactly 0.8x its v2 value, the uniform rescale and nothing else.
+# **These ALLOW verdicts are conditional on no rule firing**, and at least one of these accounts
+# will fire one: R003 needs 8 or more recipients in 24h and the salary run pays 24. Re-pin at
+# Stage 6, once there is a rule engine to re-pin them against.
 
 
 def small_merchant() -> RiskEvidence:
@@ -896,11 +1142,11 @@ def genuine_dormant_return() -> RiskEvidence:
 @pytest.mark.parametrize(
     ("build", "expected"),
     [
-        (small_merchant, 28.02),
-        (merchant_on_a_household_phone, 36.65),
-        (salary_day_fan_out, 18.52),
-        (family_pooling, 21.25),
-        (genuine_dormant_return, 5.62),
+        (small_merchant, 22.41),
+        (merchant_on_a_household_phone, 29.32),
+        (salary_day_fan_out, 14.81),
+        (family_pooling, 17.00),
+        (genuine_dormant_return, 4.50),
     ],
     ids=["merchant", "merchant_household_phone", "salary_fan_out", "family_pooling", "dormant"],
 )
@@ -917,7 +1163,7 @@ def test_no_component_can_exceed_its_own_weight():
 
     The previous test here checked the *clamped* score against 100, which
     `RiskAssessment.__post_init__` has already enforced by raising — so it could not fail. The real
-    invariant is per component: six bounded contributions is what makes the sum bounded.
+    invariant is per component: seven bounded contributions is what makes the sum bounded.
     """
     weights = ScoringConfig().weights.as_mapping()
     result = assess_risk(full_signal_evidence())
@@ -942,13 +1188,13 @@ def test_scoring_is_reproducible():
     evidence = full_signal_evidence()
     first = assess_risk(evidence)
     assert _digest(first) == _digest(assess_risk(evidence))
-    assert _digest(first) == "9d48896a03706a52d13bc6a828627458d96b86b12393ada82f43d990172c0298"
+    assert _digest(first) == "7f7301f750171825903d4348192a7f18f9937d78d2770be016271084a7779262"
 
 
 def test_reasons_lists_only_components_that_contributed():
     clean = assess_risk(RiskEvidence(account_id="ACC1", features=features()))
     assert clean.reasons == ()
-    assert len(assess_risk(full_signal_evidence()).reasons) == 6
+    assert len(assess_risk(full_signal_evidence()).reasons) == 7
 
 
 def test_changing_a_weight_changes_the_score_without_touching_the_scorer():
@@ -961,14 +1207,15 @@ def test_changing_a_weight_changes_the_score_without_touching_the_scorer():
             weights=RiskWeights(
                 pass_through=50.0,
                 fan_asymmetry=10.0,
-                network_structure=20.0,
+                network_structure=15.0,
                 account_profile=10.0,
                 velocity_anomaly=5.0,
                 identity_linkage=5.0,
+                rule_hits=5.0,
             )
         ),
     )
-    assert component(default, PASS_THROUGH).contribution == pytest.approx(25.0)
+    assert component(default, PASS_THROUGH).contribution == pytest.approx(20.0)
     assert component(reweighted, PASS_THROUGH).contribution == pytest.approx(50.0)
 
 
@@ -1224,7 +1471,7 @@ def test_requires_human_honours_a_custom_config():
 # --- assessment invariants ----------------------------------------------------------------------
 
 
-def _six_components():
+def _all_components():
     return tuple(ScoreComponent(code, code, 0.0, "clean") for code in COMPONENT_ORDER)
 
 
@@ -1235,18 +1482,18 @@ def test_an_assessment_outside_zero_to_one_hundred_is_rejected(score):
             account_id="ACC1",
             score=score,
             decision=ScoreDecision.ALLOW,
-            components=_six_components(),
+            components=_all_components(),
             evidence_sources=0,
         )
 
 
 def test_an_assessment_missing_a_component_is_rejected():
     """Missing evidence scores zero and says so; it is never omitted from the breakdown."""
-    with pytest.raises(ValueError, match="all six components"):
+    with pytest.raises(ValueError, match="all 7 components"):
         RiskAssessment(
             account_id="ACC1",
             score=0.0,
             decision=ScoreDecision.ALLOW,
-            components=_six_components()[:5],
+            components=_all_components()[:6],
             evidence_sources=0,
         )

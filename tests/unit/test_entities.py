@@ -150,6 +150,7 @@ def make_feature_vector(**overrides: object) -> FeatureVector:
         "txn_count": 17,
         "total_credit": Decimal("284000.00"),
         "total_debit": Decimal("266960.00"),
+        "balance_delta": Decimal("17040.00"),
         "distinct_credit_counterparties": 14,
         "distinct_debit_counterparties": 2,
         "max_single_txn": Decimal("98000.00"),
@@ -173,8 +174,11 @@ def make_features(**overrides: object) -> AccountFeatures:
         "window": FeatureWindow.H24,
         "as_of": TS,
         "txn_count": 17,
+        "credit_count": 14,
+        "debit_count": 3,
         "total_credit": Decimal("284000.00"),
         "total_debit": Decimal("266960.00"),
+        "balance_delta": Decimal("17040.00"),
         "distinct_credit_counterparties": 14,
         "distinct_debit_counterparties": 2,
         "max_single_txn": Decimal("98000.00"),
@@ -182,6 +186,7 @@ def make_features(**overrides: object) -> AccountFeatures:
         "pass_through_ratio": 0.94,
         "night_txn_ratio": 0.41,
         "new_counterparty_ratio": 0.93,
+        "structuring_band_count": 6,
         "distinct_devices": 1,
         "distinct_ips": 3,
         "days_since_last_activity": 0,
@@ -536,6 +541,52 @@ def test_the_stored_row_and_the_computed_vector_agree_on_the_zero_credit_branch(
     )
     vector = make_feature_vector(total_credit=Decimal("0"), total_debit=Decimal("50000"))
     assert row.pass_through_ratio == vector.pass_through_ratio == 0.0
+
+
+def test_balance_delta_survives_a_round_trip_through_the_stored_row():
+    """`FeatureVector -> AccountFeatures -> FeatureVector`, the trip the Stage 5 loader makes.
+
+    The hazard here is not a crash. `balance_delta` used to default to `Decimal("0")` on
+    `FeatureVector`, so a loader that lost the column on the way back would rebuild a vector reading
+    as a swept-clean week — the exact signature the field exists to tell apart from the legitimate
+    family-pooling account in `docs/13-KNOWN-FALSE-POSITIVES.md`. Neither shape defaults it now, so
+    the loss cannot be silent.
+    """
+    vector = make_feature_vector(
+        total_credit=Decimal("284000.00"),
+        total_debit=Decimal("266960.00"),
+        balance_delta=Decimal("17040.00"),
+    )
+    # The three columns the stored row carries and the vector does not. A loader reads them off the
+    # same query row; here they are supplied directly.
+    row = make_features(
+        **{field.name: getattr(vector, field.name) for field in dataclasses.fields(vector)},
+        credit_count=14,
+        debit_count=3,
+        structuring_band_count=6,
+        pass_through_ratio=vector.pass_through_ratio,
+    )
+    assert row.balance_delta == Decimal("17040.00")
+
+    returned = make_feature_vector(
+        **{field.name: getattr(row, field.name) for field in dataclasses.fields(vector)}
+    )
+    assert returned == vector
+    assert returned.balance_delta == Decimal("17040.00")
+
+
+@pytest.mark.parametrize("factory", [make_feature_vector, make_features])
+def test_neither_feature_shape_constructs_without_a_balance_delta(factory):
+    """A default of zero would make "never computed" and "broke even at zero" the same value, and
+    the second is a real week. Omission has to be a `TypeError` at construction instead."""
+    complete = factory()
+    without = {
+        field.name: getattr(complete, field.name)
+        for field in dataclasses.fields(complete)
+        if field.name != "balance_delta"
+    }
+    with pytest.raises(TypeError, match="balance_delta"):
+        type(complete)(**without)
 
 
 def test_pass_through_ratio_is_zero_when_nothing_came_in():

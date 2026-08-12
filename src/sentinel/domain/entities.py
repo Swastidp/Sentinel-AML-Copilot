@@ -289,14 +289,28 @@ class AccountFeatures:
 
     Ratios and the z-score are `float`: they are dimensionless statistics that go straight into
     scikit-learn, never into a balance.
+
+    The field order is the column order of `docs/02-DATA-MODEL.md`'s `ACCOUNT_FEATURES`, which is
+    also the order `pipeline/features.FEATURE_SCHEMA` writes. All three are meant to be readable
+    side by side, so a column added to one and missed by another shows up as a misalignment rather
+    than as a `KeyError` in the Stage 5 loader.
+
+    **`balance_delta` is required and carries no default**, unlike every other signed statistic that
+    could plausibly start at zero. A default would let a loader that forgot the column reconstruct
+    `Decimal("0")`, and a zero here is indistinguishable from a genuine break-even week — which is
+    precisely the family-pooling false positive in `docs/13-KNOWN-FALSE-POSITIVES.md` that this
+    column exists to separate from a real collection mule. Missing must fail loudly at construction.
     """
 
     account_id: str
     window: FeatureWindow
     as_of: datetime
     txn_count: int
+    credit_count: int
+    debit_count: int
     total_credit: Decimal
     total_debit: Decimal
+    balance_delta: Decimal
     distinct_credit_counterparties: int
     distinct_debit_counterparties: int
     max_single_txn: Decimal
@@ -304,6 +318,7 @@ class AccountFeatures:
     pass_through_ratio: float
     night_txn_ratio: float
     new_counterparty_ratio: float
+    structuring_band_count: int
     distinct_devices: int
     distinct_ips: int
     days_since_last_activity: int
@@ -313,6 +328,11 @@ class AccountFeatures:
         ensure_aware(self.as_of, "as_of")
         ensure_non_negative(self.total_credit, "total_credit")
         ensure_non_negative(self.total_debit, "total_debit")
+        # `balance_delta` is deliberately unguarded, unlike the two totals it is derived from: it is
+        # signed, and negative is the ordinary case for an account spending down a balance it held
+        # before the window opened. Same rule as `FeatureVector.balance_delta`.
+        # The three counts join `txn_count` in being unguarded: they are `int` aggregates the SQL
+        # coalesces to zero, and there is no bound to check that the type does not already give.
         # `pass_through_ratio` is intentionally not capped at 1.0 — an account can disperse more
         # than it received in the window by spending an opening balance, and that is a real signal.
         ensure_in_range(self.night_txn_ratio, "night_txn_ratio", 0.0, 1.0)
