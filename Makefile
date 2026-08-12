@@ -1,14 +1,14 @@
 # Sentinel AML Copilot - task runner.
 #
 # On Windows, GNU Make is installed as `mingw32-make` (C:\MinGW\bin).
-# Use `mingw32-make <target>`; on Linux/macOS and in CI, plain `make <target>`.
+# Use `mingw32-make <target>`; on Linux/macOS, plain `make <target>`.
 # Activate the virtualenv first: .venv\Scripts\activate  (Windows)  /  source .venv/bin/activate
 
 PY  := python
 PKG := sentinel
 
-.PHONY: help install doctor bootstrap generate quality pipeline api ui test test-integration \
-        eval loadtest report metrics check fmt lint types cov clean
+.PHONY: help install doctor bootstrap migrate generate quality features load pipeline api ui test \
+        test-integration eval loadtest report metrics check fmt lint types cov clean
 
 help:
 	@echo "Sentinel AML Copilot"
@@ -16,8 +16,12 @@ help:
 	@echo "  install           install the package with dev extras"
 	@echo "  doctor            ping every store and verify the LLM model slugs"
 	@echo "  bootstrap         create Postgres schema, Neo4j constraints, Qdrant collections"
+	@echo "  migrate           apply the Postgres migrations - additive, idempotent, safe to repeat"
+	@echo "  load              push the curated zone to Neon and verify counts against DuckDB"
 	@echo "  generate          synthesise the population and land it in the raw zone"
 	@echo "  quality           run the data-quality gate - exits 1 if a BLOCKING check fails"
+	@echo "  detect            run rules R001-R007 + Isolation Forest, upsert alerts to Postgres"
+	@echo "  features          gate, promote raw -> curated, then compute the 7D/30D features"
 	@echo "  pipeline          full batch: generate -> validate -> load all stores"
 	@echo "  api               run the FastAPI service (reload)"
 	@echo "  ui                run the Streamlit console"
@@ -29,7 +33,7 @@ help:
 	@echo "  report            metrics + Excel MIS pack"
 	@echo "  lint              ruff check + format --check"
 	@echo "  types             mypy --strict"
-	@echo "  check             ruff + mypy --strict + unit tests (what CI runs)"
+	@echo "  check             ruff + mypy --strict + unit tests (run this before pushing)"
 	@echo "  fmt               auto-fix lint and format"
 	@echo "  cov               unit tests with a coverage report"
 	@echo "  clean             remove caches and generated artefacts"
@@ -44,6 +48,10 @@ doctor:
 bootstrap:
 	$(PY) scripts/bootstrap_stores.py
 
+# Additive only, and idempotent: running it twice prints identical output and changes nothing.
+migrate:
+	$(PY) -m $(PKG).infrastructure.postgres.migrate
+
 generate:
 	$(PY) -m $(PKG).pipeline.generate
 
@@ -51,6 +59,22 @@ generate:
 # The report is still written to data/quality/dq_report.json either way.
 quality:
 	$(PY) -m $(PKG).pipeline.quality
+
+# Runs the gate itself first, so a BLOCKING failure exits non-zero here too and nothing is promoted.
+# Idempotent: re-running replaces the curated partitions and the feature file rather than appending.
+features:
+	$(PY) -m $(PKG).pipeline.features
+
+# Migrates first (a no-op when the schema is already there), then loads and verifies. Idempotent:
+# re-running leaves identical row counts, which is what the ON CONFLICT DO UPDATE writes buy.
+load:
+	$(PY) -m $(PKG).pipeline.load
+
+# Reads the curated feature file, fits and persists the Isolation Forest, and upserts one alert per
+# finding. Idempotent: `alert_id` is derived from (account, rule, window_end), and the upsert leaves
+# `status` alone so a re-run cannot reopen an alert an analyst has already moved.
+detect:
+	$(PY) -m $(PKG).pipeline.detect
 
 pipeline:
 	$(PY) -m $(PKG).pipeline.run
@@ -79,9 +103,13 @@ metrics:
 report: metrics
 	$(PY) -m $(PKG).reporting.excel
 
+# The third line is the T7.1 label-leakage rule: it fails if anything outside the metrics path
+# reads `typology_labels`. A leak there would make every precision figure unfalsifiable, and it
+# would be invisible in the output - the numbers would simply get better.
 lint:
 	$(PY) -m ruff check src tests scripts
 	$(PY) -m ruff format --check src tests scripts
+	$(PY) scripts/check_label_leakage.py
 
 types:
 	$(PY) -m mypy src scripts tests/unit/test_port_conformance.py

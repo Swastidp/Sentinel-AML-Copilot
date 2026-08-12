@@ -106,7 +106,7 @@ technology list.
 | API | **FastAPI** + Pydantic v2 | Async, typed, self-documenting |
 | UI | **Streamlit** | Fastest credible analyst console |
 | Reporting | **openpyxl** | Business consumers want Excel, so the pipeline emits Excel |
-| Orchestration / CI | **GitHub Actions** | The answer to "what orchestrates this?" — an honest cron-plus-secrets stand-in for Airflow, not a claim to be one |
+| Orchestration / CI | **GitHub Actions** *(chosen, not yet wired — no workflow file exists)* | The answer to "what orchestrates this?" — an honest cron-plus-secrets stand-in for Airflow, not a claim to be one |
 | ML | **scikit-learn** Isolation Forest | Unsupervised is the correct choice: fraud labels are scarce, arrive months late, and are severely imbalanced |
 
 ### Three design decisions worth calling out
@@ -135,10 +135,10 @@ reactivation, and device-shared rings.
 trivially reach 1.0: a small merchant with genuinely high fan-in, salary-day fan-out, family
 expense pooling, and a genuine dormant-account return.
 
-Ground truth lives in a `typology_labels` table that **only the metrics module and the tests may
-read** — a lint rule is designed to enforce it once CI exists; today the boundary is held by
-convention and a test. Precision and recall are measured against it and reported as measured,
-whatever the numbers turn out to be.
+Ground truth lives in a `typology_labels` table that **only the reporting modules and the tests may
+read**. `scripts/check_label_leakage.py` enforces that — it runs as part of `make lint` and fails the
+command if any other module touches the labels. It is a Make step, not CI; there is no CI. Precision
+and recall are measured against it and reported as measured, whatever the numbers turn out to be.
 
 ## Getting started
 
@@ -153,7 +153,8 @@ cp .env.example .env            # then fill in your keys
 ```
 
 `.env.example` documents every required key, including which console screen each one comes from.
-Nothing sensitive is committed; secrets live in `.env` locally and in GitHub Actions Secrets for CI.
+Nothing sensitive is committed; secrets live in `.env` locally, and would go in GitHub Actions
+Secrets once CI is wired up.
 
 | Command | What it does |
 |---|---|
@@ -165,15 +166,17 @@ Nothing sensitive is committed; secrets live in `.env` locally and in GitHub Act
 | `make ui` | Run the Streamlit investigator console |
 | `make test` | Unit tests — no network, no LLM tokens |
 | `make eval` | Agent eval harness against the golden alert set (**costs tokens**) |
-| `make check` | `ruff` + `mypy --strict` + 370 unit tests — the intended CI gate (no workflow file exists yet) |
+| `make check` | `ruff` + `mypy --strict` + the full unit suite — the intended CI gate (no workflow file exists yet) |
 
-`make help` lists all 20 targets. On Windows, GNU Make is typically installed as `mingw32-make`,
+`make help` lists all 24 targets. On Windows, GNU Make is typically installed as `mingw32-make`,
 so substitute that for `make` (e.g. `mingw32-make check`).
 
 Every load is designed to be idempotent: Postgres uses `INSERT … ON CONFLICT DO UPDATE`, Neo4j uses
 `MERGE`, and Qdrant point IDs are deterministic UUID5 hashes, so re-running the pipeline is always
-safe. None of the four loaders is written yet — `generate` and `quality` are the two stages that run
-today.
+safe. **The Postgres loader is written and has run** — 231,519 data rows plus 839 alerts on Neon,
+and a second run leaves the counts identical. The Neo4j and Qdrant loaders are not written. Five
+stages run today — `generate`, `quality`, `features`, `load` and `detect` — and they run
+individually, because `make pipeline` needs a `pipeline/run.py` that does not exist yet.
 
 ## Honest limitations
 
