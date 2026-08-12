@@ -1,10 +1,17 @@
 """The raw-zone (BRONZE) writer: domain entities out to date-partitioned Parquet.
 
-This is the only module that knows the physical layout of the lakehouse. Everything upstream works
-with `Customer`, `Account`, `Device`, `Transaction` and `TypologyLabel`; everything downstream
-(`pipeline/ingest.py`, DuckDB, the data-quality gate) reads the files this writes. Swapping local
-disk for `s3://bucket/raw` is a change to `Settings.data_raw_path` and nothing else, which is the
-reason the paths are parameters rather than constants.
+This module owns the raw zone's layout and the schemas the whole lakehouse is written and read by.
+Everything upstream works with `Customer`, `Account`, `Device`, `Transaction` and `TypologyLabel`;
+everything downstream (`pipeline/ingest.py`, DuckDB, the data-quality gate) reads the files this
+writes. Swapping local disk for `s3://bucket/raw` is a change to `Settings.data_raw_path` and
+nothing else, which is the reason the paths are parameters rather than constants.
+
+It is not the only writer, and saying otherwise would be the kind of comment that quietly stops
+being true. `pipeline/promote.py` writes the curated zone through DuckDB `COPY`, and
+`pipeline/features.py` writes `curated/account_features/` from Arrow — both because the rows they
+write never exist as domain entities to hand to the functions below. Promotion still takes its
+directory names and schemas from the constants here; the feature table declares its own, and is
+read back through `read_table` like everything else, so a reader needs no special case for it.
 
 Four decisions here are load-bearing, and each would be a real defect if reversed:
 
