@@ -121,7 +121,15 @@ class Settings(BaseSettings):
     data_curated_path: Path = Path("data/curated")
     data_seed_path: Path = Path("data/seed")
     data_quality_path: Path = Path("data/quality")
-    duckdb_path: Path = Path("data/sentinel.duckdb")
+    #: Where fitted model artefacts land. A path and not a weight, so it belongs here rather than in
+    #: `config/weights.py`: the Isolation Forest's *hyperparameters* are a model and live there, but
+    #: where the pickle is written is deployment, and pointing it at a mounted volume or an s3://
+    #: prefix must not require a code change.
+    model_path: Path = Path("data/models")
+    # There is deliberately no `duckdb_path`. `duckdb_engine.connect()` opens `:memory:` and reads
+    # the curated Parquet through `read_parquet(...)`; a persisted `.duckdb` file would be a third
+    # copy of data that already lives in Parquet and in Postgres, and the first time it went stale
+    # nobody would know which copy was right.
 
     # --- data-quality gate ---------------------------------------------------------------------
     # Operational knobs, deliberately here and not in `config/weights.py`. The risk *weights* are a
@@ -141,6 +149,26 @@ class Settings(BaseSettings):
     #: How many previous batch profiles form the rolling baseline. One batch a day makes this the
     #: "7-day rolling mean" the check table names.
     dq_baseline_batches: int = Field(default=7, ge=1, le=90)
+
+    # --- feature computation (DuckDB, Stage 4) -------------------------------------------------
+    # Same reasoning as the data-quality knobs above: these are tolerances and reporting boundaries
+    # an operations team moves per environment, not model weights. `config/weights.py` holds the
+    # thresholds the *rules* compare features against; these decide how the features themselves are
+    # measured. Every one of them is bound into the feature SQL as a parameter, so the query text
+    # holds no magic numbers and "why is this account's structuring count 9?" is answerable from
+    # config alone.
+    #: The just-under-reporting-limit band. India's cash reporting threshold is Rs 50,000, so a run
+    #: of deposits between these two figures is the structuring signature. Matches the band the
+    #: generator injects in `pipeline/typologies.py`.
+    feature_structuring_low_inr: Decimal = Field(default=Decimal("45000"), gt=0)
+    feature_structuring_high_inr: Decimal = Field(default=Decimal("49900"), gt=0)
+    #: How much ledger history an account needs before its velocity z-score means anything. Below
+    #: this the score is reported as 0.0 rather than as a number computed from two days of data.
+    feature_velocity_min_baseline_days: int = Field(default=14, ge=1, le=365)
+    #: Floor on the expected transaction count a window is compared against. Without it an account
+    #: with no prior history has an expected count of zero, and every division by its square root is
+    #: either infinite or undefined — which is exactly the dormant-reactivation case.
+    feature_velocity_min_expected: float = Field(default=1.0, gt=0.0)
 
     # --- synthetic data generation -----------------------------------------------------------
     generator_seed: int = 20260803
@@ -261,10 +289,10 @@ class Settings(BaseSettings):
             self.data_raw_path,
             self.data_curated_path,
             self.data_quality_path,
+            self.model_path,
             self.embedding_cache_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
-        self.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)

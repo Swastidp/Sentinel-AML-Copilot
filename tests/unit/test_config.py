@@ -156,14 +156,14 @@ def test_data_dirs_are_created(tmp_path):
     settings = make_settings(
         data_raw_path=tmp_path / "raw",
         data_curated_path=tmp_path / "curated",
+        data_quality_path=tmp_path / "quality",
         embedding_cache_dir=tmp_path / "cache",
-        duckdb_path=tmp_path / "warehouse" / "s.duckdb",
     )
     settings.ensure_data_dirs()
     assert (tmp_path / "raw").is_dir()
     assert (tmp_path / "curated").is_dir()
+    assert (tmp_path / "quality").is_dir()
     assert (tmp_path / "cache").is_dir()
-    assert (tmp_path / "warehouse").is_dir()
 
 
 # --- log redaction -----------------------------------------------------------------------------

@@ -130,7 +130,14 @@ disallow_untyped_calls = false
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+# The repo root, so `tests/unit/test_label_leakage.py` can import `scripts/check_label_leakage.py`.
+# `scripts/` is not a package and must not become one — it holds entrypoints, not library code — so
+# an implicit namespace import off the root is the way in. `src/` is unaffected: `sentinel` comes
+# from the editable install either way.
+pythonpath = ["."]
+# `-rs` prints the reason for every skipped test in the summary. A test that vanishes quietly is
+# worse than no test, because the run still reports green — so skips are made loud by default.
+addopts = "-q -rs --strict-markers"
 markers = [
     "integration: requires live cloud stores (Postgres, Neo4j, Qdrant, Redis)",
     "eval: costs LLM tokens — excluded from CI",
